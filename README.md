@@ -51,10 +51,65 @@ Aqui as três camadas são schemas do MySQL e as transformações são Stored Pr
 
 ## O pipeline
 
-```text
-db_bronze.tb_clientes ─┐                          ┌─► db_silver.tb_clientes ────────┐
-                       ├─► sp_carregar_silver() ──┼─► db_silver.tb_vendas ──────────┼─► sp_carregar_gold() ─► db_gold.tb_relatorio_vendas
-db_bronze.tb_vendas ───┘                          └─► db_silver.tb_vendas_rejeitadas│      (via tmp_resumo_vendas)
+```mermaid
+flowchart LR
+  subgraph Bronze[db_bronze: texto bruto]
+    BC[tb_clientes]
+    BV[tb_vendas]
+  end
+  subgraph Silver[db_silver: limpo e tipado]
+    SC[tb_clientes]
+    SV[tb_vendas]
+    SR[tb_vendas_rejeitadas]
+  end
+  subgraph Gold[db_gold: pronto para relatório]
+    GR[tb_relatorio_vendas]
+  end
+  BC & BV --> P1([sp_carregar_silver])
+  P1 --> SC & SV & SR
+  SC & SV --> P2([sp_carregar_gold<br>via tmp_resumo_vendas])
+  P2 --> GR
+```
+
+```mermaid
+erDiagram
+  SILVER_tb_clientes ||--o{ SILVER_tb_vendas : compra
+  SILVER_tb_clientes ||--|| GOLD_tb_relatorio_vendas : resume
+  BRONZE_tb_vendas {
+    int id_venda PK
+    int id_cliente
+    varchar data_venda "texto, vários formatos"
+    varchar valor "texto, 1.200,00 / NaN"
+    varchar origem
+  }
+  SILVER_tb_clientes {
+    int id_cliente PK
+    varchar nome
+    varchar email "NULL se INVALIDO"
+    varchar email_original
+    enum status_email "VALIDO, CORRIGIDO, INVALIDO"
+  }
+  SILVER_tb_vendas {
+    int id_venda PK
+    int id_cliente FK
+    date data_venda
+    decimal valor "CHECK > 0"
+  }
+  SILVER_tb_vendas_rejeitadas {
+    int id_venda PK
+    int id_cliente
+    varchar data_original
+    varchar valor_original
+    enum motivo
+  }
+  GOLD_tb_relatorio_vendas {
+    int id_cliente PK
+    varchar nome_cliente
+    decimal total_vendas
+    int qtd_vendas
+    decimal ticket_medio
+    datetime atualizado_em
+  }
 ```
 
 ### `sp_carregar_silver()` (Bronze → Silver)
@@ -79,6 +134,37 @@ mysql -u root -p < sql/03_camada_gold.sql
 mysql -u root -p < hands_on_medalhao.sql     # cria as procedures, executa e valida
 ```
 
+Sem MySQL instalado, com um container descartável:
+
+```bash
+docker run -d --name medalhao -e MYSQL_ROOT_PASSWORD=senha mysql:8.4
+# espere uns 20 s até o servidor subir
+for f in sql/01_camada_bronze.sql sql/02_camada_silver.sql sql/03_camada_gold.sql hands_on_medalhao.sql; do
+  docker exec -i medalhao mysql --default-character-set=utf8mb4 -uroot -psenha < "$f"
+done
+docker exec medalhao mysql --default-character-set=utf8mb4 -uroot -psenha -t -e "SELECT * FROM db_gold.tb_relatorio_vendas"
+docker rm -f medalhao   # quando terminar
+```
+
+Saída da Gold (resumida, sem `atualizado_em`):
+
+```
++------------+------------------+--------------+------------+--------------+
+| id_cliente | nome_cliente     | total_vendas | qtd_vendas | ticket_medio |
++------------+------------------+--------------+------------+--------------+
+|          1 | Ana Souza        |      1599.90 |          2 |       799.95 |
+|          2 | Bruno Lima       |       226.00 |          2 |       113.00 |
+|          3 | Carla Mendes     |      2350.75 |          1 |      2350.75 |
+|          4 | Diego Rocha      |        45.00 |          1 |        45.00 |
+|          5 | Elisa Ferraz     |       980.00 |          1 |       980.00 |
+|          6 | Fábio Nunes      |         0.00 |          0 |         0.00 |
+|          7 | Gabriela Tavares |        89.90 |          1 |        89.90 |
+|          8 | Henrique Prado   |      1300.00 |          2 |       650.00 |
+|          9 | Isabela Martins  |         0.00 |          0 |         0.00 |
+|         10 | João Pedro Alves |         0.00 |          0 |         0.00 |
++------------+------------------+--------------+------------+--------------+
+```
+
 `hands_on_medalhao.sql` é o arquivo de entrega: Parte 1 (procedure Silver), Parte 2 (procedure Gold) e Parte 3 (`CALL` e consultas de validação).
 
 ## Testes realizados (MySQL 8.4, 16/11/2026)
@@ -98,6 +184,15 @@ mysql -u root -p < hands_on_medalhao.sql     # cria as procedures, executa e val
 | VALOR_INVALIDO | 106 (`NaN`), 114 (`abc`), 119 (vazio) |
 | VALOR_NAO_POSITIVO | 107 (`0`), 108 (`-50,00`) |
 | DATA_INVALIDA | 111 (30/02), 112 (`20/08/2024`), 118 (31/11), 121 (mês 13), 122 (sem data) |
+
+## Estrutura
+
+```
+sql/01_camada_bronze.sql   db_bronze com os dados brutos (22 vendas, 10 clientes)
+sql/02_camada_silver.sql   tabelas vazias da Silver
+sql/03_camada_gold.sql     tabela da Gold e schema db_sp
+hands_on_medalhao.sql      procedures, CALLs e consultas de validação
+```
 
 ## Sobre os scripts de preparação
 
